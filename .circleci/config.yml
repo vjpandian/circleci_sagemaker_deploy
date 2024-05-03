@@ -1,31 +1,155 @@
-# Use the latest 2.1 version of CircleCI pipeline process engine.
-# See: https://circleci.com/docs/configuration-reference
 version: 2.1
 
-# Define a job to be invoked later in a workflow.
-# See: https://circleci.com/docs/jobs-steps/#jobs-overview & https://circleci.com/docs/configuration-reference/#jobs
-jobs:
-  say-hello:
-    # Specify the execution environment. You can specify an image from Docker Hub or use one of our convenience images from CircleCI's Developer Hub.
-    # See: https://circleci.com/docs/executor-intro/ & https://circleci.com/docs/configuration-reference/#executor-job
-    docker:
-      # Specify the version you desire here
-      # See: https://circleci.com/developer/images/image/cimg/base
-      - image: cimg/base:current
+orbs:
+  aws-sagemaker: circleci/aws-sagemaker@1.0
 
-    # Add steps to the job
-    # See: https://circleci.com/docs/jobs-steps/#steps-overview & https://circleci.com/docs/configuration-reference/#steps
+# To understand context of these, please see their usage down below and the readme.
+parameters:
+  bucket:
+    type: string
+    default: vijay-sagemaker-demo-bucket
+  model_desc:
+    type: string
+    default: "Kitten Classifier allowing us to distinguish between giraffes and kittens."
+  model_name:
+    type: string
+    default: vijay-kitten-classifier
+  project_id:
+    type: string
+    default: "03d6c223-e8fc-4e8a-8431-25c30b9e047c"
+  region_name:
+    type: string
+    default: us-east-1
+
+main-branch-only: &main-branch-only
+  branches:
+    only:
+      - main
+
+# This workflow demonstrates moving your SageMaker model from dev to production
+workflows:
+  deploy-model-through-to-prod:
+    jobs:
+      - aws-sagemaker/create_model:
+          # job name that will show in Workflow DAG
+          name: create-model
+          # s3 bucket where asset will be stored
+          bucket: << pipeline.parameters.bucket >>
+          # Name of the model in SageMaker that we will be deploying.
+          model_name: << pipeline.parameters.model_name >>
+          # We use the pipeline.id as the unique identifier for some of the configs we create
+          circle_pipeline_id: << pipeline.id >>
+          # Region where we are deploying to
+          region_name: << pipeline.parameters.region_name >>
+          filters: *main-branch-only
+
+      - aws-sagemaker/create_endpoint_configuration: # q: should this be create_endpoint_configuration?
+          name: dev:create-model-endpoint-config
+          bucket: << pipeline.parameters.bucket >>
+          # Name of env you are working with. This is just some arbirtrary string thats works for how you like to organize.
+          deploy_environment: dev
+          model_name: << pipeline.parameters.model_name >>
+          circle_pipeline_id: << pipeline.id >>
+          circle_project_id: << pipeline.parameters.project_id >>
+          region_name: << pipeline.parameters.region_name >>
+          requires:
+            - create-model
+          filters: *main-branch-only
+
+      - aws-sagemaker/deploy_endpoint:
+          name: dev:deploy-model-to-endpoint
+          bucket: << pipeline.parameters.bucket >>
+          deploy_environment: dev
+          model_name: << pipeline.parameters.model_name >>
+          # Description for the model. q: can we make it optional?
+          model_desc: << pipeline.parameters.model_desc >>
+          circle_pipeline_id: << pipeline.id >>
+          # You can find this value in the Project Settings in CircleCI
+          circle_project_id: << pipeline.parameters.project_id >>
+          region_name: << pipeline.parameters.region_name >>
+          requires:
+            - dev:create-model-endpoint-config
+          filters: *main-branch-only
+
+      - kitten-model-invoke:
+          requires:
+            - dev:deploy-model-to-endpoint
+          filters: *main-branch-only
+
+      - promote-model-to-prod-endpoint:
+          type: approval
+          requires:
+            - kitten-model-invoke
+          filters: *main-branch-only
+
+      - aws-sagemaker/create_endpoint_configuration:
+          name: prod:create-model-endpoint-config
+          bucket: << pipeline.parameters.bucket >>
+          deploy_environment: prod
+          model_name: << pipeline.parameters.model_name >>
+          circle_pipeline_id: << pipeline.id >>
+          circle_project_id: << pipeline.parameters.project_id >>
+          region_name: << pipeline.parameters.region_name >>
+          requires:
+            - promote-model-to-prod-endpoint
+          filters: *main-branch-only
+
+      - aws-sagemaker/deploy_endpoint:
+          name: prod:deploy-model-to-endpoint
+          bucket: << pipeline.parameters.bucket >>
+          deploy_environment: prod
+          model_name: << pipeline.parameters.model_name >>
+          model_desc: << pipeline.parameters.model_desc >>
+          circle_pipeline_id: << pipeline.id >>
+          circle_project_id: << pipeline.parameters.project_id >>
+          region_name: << pipeline.parameters.region_name >>
+          requires:
+            - prod:create-model-endpoint-config
+          filters: *main-branch-only
+
+  # For model-train work. if you won't need to train a model to use the demo, go ahead and delete it
+  model-train:
+    jobs:
+      - kitten-model-train:
+          filters:
+            branches:
+              only:
+                - model-train
+
+# For model-train work. if you won't need to train a model to use the demo, go ahead and delete it
+jobs:
+  kitten-model-train:
+    docker:
+      - image: python:3.11
+    environment:
+      BUCKET_NAME: << pipeline.parameters.bucket >>
+      REGION_NAME: << pipeline.parameters.region_name >>
+      MODEL_NAME: << pipeline.parameters.model_name >>
+      MODEL_DESC: << pipeline.parameters.model_desc >>
     steps:
-      # Checkout the code as the first step.
       - checkout
       - run:
-          name: "Say hello"
-          command: "echo Hello, World!"
-
-# Orchestrate jobs using workflows
-# See: https://circleci.com/docs/workflows/ & https://circleci.com/docs/configuration-reference/#workflows
-workflows:
-  say-hello-workflow: # This is the name of the workflow, feel free to change it to better match your workflow.
-    # Inside the workflow, you define the jobs you want to run.
-    jobs:
-      - say-hello
+          name: install python dependencies
+          command: pip install -r ./kitten_model/requirements.txt --upgrade
+      - run:
+          name: gather data
+          command: python ./kitten_model/gather_data.py
+      - run:
+          name: train and register model
+          command: python ./kitten_model/train_register.py
+  kitten-model-invoke:
+    docker:
+      - image: python:3.11
+    environment:
+      BUCKET_NAME: << pipeline.parameters.bucket >>
+      REGION_NAME: << pipeline.parameters.region_name >>
+      MODEL_NAME: << pipeline.parameters.model_name >>
+      MODEL_DESC: << pipeline.parameters.model_desc >>
+    steps:
+      - checkout
+      - run:
+          name: install python dependencies
+          command: pip install -r ./kitten_model/requirements.txt --upgrade
+      - run:
+          name: invoke model
+          command: python ./kitten_model/invoke_and_eval.py
