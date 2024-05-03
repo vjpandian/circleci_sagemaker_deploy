@@ -13,7 +13,7 @@ parameters:
     default: "Kitten Classifier allowing us to distinguish between giraffes and kittens."
   model_name:
     type: string
-    default: vijay-kitten-classifier
+    default: kitten-classifier
   project_id:
     type: string
     default: "03d6c223-e8fc-4e8a-8431-25c30b9e047c"
