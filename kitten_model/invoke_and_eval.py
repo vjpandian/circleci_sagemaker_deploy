@@ -66,7 +66,7 @@ payload = csv_file.getvalue()
 #
 # The endpoint name will be the dev variant, before approving for prod deploy
 ###############################################################################
-endpoint_name=model_name + "-dev"
+endpoint_name="kitten-classifier-sagemaker-demo"
 response = sagemaker_runtime_client.invoke_endpoint(
             EndpointName=endpoint_name,
             Body=payload,
